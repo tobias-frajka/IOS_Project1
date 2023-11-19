@@ -1,0 +1,863 @@
+#!/bin/bash
+
+POSIXLY_CORRECT=yes
+# Enforces POSIX compliance in the script, affecting how certain commands operate.
+
+EDITOR=${VISUAL:-${EDITOR:-vi}}
+# Sets the default editor. Uses VISUAL if set, otherwise uses EDITOR, or defaults to vi.
+
+MOLE_RC_DIRECTORY=""
+FILE_PATH=""
+DATE_TIME=$(date +%Y-%m-%d_%H-%M-%S)
+# Variables for configuration directory, file path, and current date-time.
+
+# Flag variables initialized to 0 (not set).
+AFLAG=0
+BFLAG=0
+MFLAG=0
+GFLAG=0
+LISTFLAG=0
+DIRFLAG=0
+SECRET_LOGFLAG=0
+
+error_handler() {
+    # A function to handle different types of errors based on the error code.
+    # It prints a specific error message to standard error (stderr).
+
+    case $1 in
+        1)
+            echo "Error: Wrong date format" >&2
+            ;;
+        2)
+            echo "Error: MOLE_RC variable is empty" >&2
+            ;;
+        3)
+            echo "Error: More than one file" >&2
+            ;;
+        4)
+            echo "Error: No matching file found" >&2
+            ;;
+        5)  
+            echo "Error: Non-existent folder" >&2
+            ;;
+        6)  
+            echo "Error: realpath is not installed" >&2
+            ;;
+
+    esac
+}
+
+help() {
+    # Displays the usage instructions for the script.
+    # Includes information about command-line options and their purposes.
+
+    echo "Usage: "
+    echo "mole [-g GROUP] FILE"
+    echo "  - If the -g switch was specified, the given file opening will also be assigned to a group named GROUP. GROUP can be the name of either an existing or a new group."
+    echo " "
+    echo "mole [-m] [FILTERS] [DIRECTORY] - If DIRECTORY matches an existing directory, the script selects a file from that directory to open."
+    echo "  - If no directory is specified, the current directory is assumed."
+    echo "  - If multiple files were edited by the script in the given directory, the file that was last opened (edited) using the script is selected."
+    echo "  - If the -m argument was specified, the script selects the file that was most often opened (edited) using the script."
+    echo "  - The file selection can be further influenced by the specified FILTERS filters."
+    echo " "
+    echo "mole list [FILTERS] [DIRECTORY] - The script displays a list of files that were opened (edited) in the given directory using the script."
+    echo "  - If no directory is specified, the current directory is assumed."
+    echo "  - The list of files can be filtered using FILTERS."
+    echo " "
+    echo "Filters:"
+    echo "[-g GROUP1[,GROUP2[,...]]] - Group specifications. A file will be considered (for opening or listing purposes) only if its execution falls into at least one of these groups."
+    echo "[-a DATE] - Records of opened (edited) files before this date will not be considered."
+    echo "[-a DATE] - Records of opened (edited) files after this date will not be considered."
+    echo "  - DATE is in format YYYY-MM-DD"
+    echo " "
+    echo "Configuration: "
+    echo "  - The script remembers information about its execution in a file given by the MOLE_RC variable."
+    echo "  - The script starts the editor that is set in the EDITOR variable. If the EDITOR variable is not set, it respects the VISUAL variable. If neither is set, the vi command is used."
+}
+
+parse_args() {
+    # Parses command-line arguments passed to the script.
+    # Uses getopts for option parsing and sets various flags based on the options.
+
+    if [ "$1" = "list" ]; then
+        LISTFLAG=1
+        shift
+    fi
+
+    if [ "$1" = "secret-log" ]; then
+        SECRET_LOGFLAG=1
+        shift
+    fi
+
+    while getopts ":hg:a:b:m" opt; do
+        case $opt in
+        h)
+            help
+            exit 0
+            ;;
+
+        g)
+            GFLAG=1
+            GROUP="$OPTARG"
+            ;;
+
+        a)
+            if ! date -d "$OPTARG" >/dev/null 2>&1; then
+                error_handler 1
+                exit 1
+            fi
+
+            AFLAG=1
+            A_TIME="$OPTARG"
+            ;;
+
+        b)
+            if ! date -d "$OPTARG" >/dev/null 2>&1; then
+                error_handler 1
+                exit 1
+            fi
+
+            BFLAG=1
+            B_TIME="$OPTARG"
+            ;; 
+
+        m)
+            MFLAG=1
+            ;;
+
+        \?)
+            echo "Error: Invalid option: -$OPTARG" >&2
+            exit 1
+            ;;
+
+        :)
+            echo "Error: Option -$OPTARG requires an argument." >&2
+            exit 1
+            ;;
+        esac
+
+    done
+}
+
+last_opened_file () {
+    # Determines the last opened file in the specified directory.
+    # It takes into account different filters set by flags such as GFLAG, AFLAG, BFLAG.
+    # The function uses awk to process the MOLE_RC_DIRECTORY file and finds the most recent file based on the date and other criteria.
+
+    # The series of if-elif statements check the combination of flags set and applies filters accordingly.
+    # Each block within these statements uses awk to scan the MOLE_RC_DIRECTORY and selects the file based on the specified criteria.
+
+    # The final selected file path is stored in FILE_PATH. If no file is found, an error is triggered using error_handler.
+
+    if [ $GFLAG -ne 1 ]; then
+
+        if [ $AFLAG -eq 1 ] && [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v A_TIME="$A_TIME" -v B_TIME="$B_TIME"  -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if ( (arr[1] > A_TIME) && (arr[1] < B_TIME) && ($4 != "deleted")){
+                    if ($0 ~ FILE_PATH){x=$1}; 
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        
+
+        elif [ $AFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v A_TIME="$A_TIME" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if (( arr[1] > A_TIME ) && ($4 != "deleted")){
+                    if ($0 ~ FILE_PATH){x=$1};
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        
+
+        elif [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v B_TIME="$B_TIME" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if (( arr[1] < B_TIME ) && ($4 != "deleted")){
+                    if ($0 ~ FILE_PATH){x=$1};
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        
+        elif [ $AFLAG -ne 1 ] && [ $BFLAG -ne 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                if ($4 != "deleted"){
+                    if ($0 ~ FILE_PATH){x=$1} 
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        fi
+    
+
+    elif [ $GFLAG -eq 1 ]; then
+
+        if [ $AFLAG -eq 1 ] && [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v GROUP="$GROUP" -v A_TIME="$A_TIME" -v B_TIME="$B_TIME"  -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if ((arr[1] > A_TIME && arr[1] < B_TIME) && ($4 != "deleted")){
+                    if ($0 ~ FILE_PATH && $3 ~ GROUP){x=$1} 
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+
+
+        elif [ $AFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v GROUP="$GROUP" -v A_TIME="$A_TIME" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH ){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if (( arr[1] > A_TIME && ($4 != "deleted")){
+                    if ($0 ~ FILE_PATH && $3 ~ GROUP){x=$1} 
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+
+
+        elif [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -v GROUP="$GROUP" -v B_TIME="$B_TIME" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, arr, "_")
+                if (( arr[1] < B_TIME) && ($4 != "deleted")){
+                    if (($0 ~ FILE_PATH) && ($3 ~ GROUP)){x=$1}
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        
+        else
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v GROUP="$GROUP" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+                
+                if($4 != "deleted"){
+                   if ($3 ~ GROUP){x=$1}
+                }
+            }
+            END {print x}' "$MOLE_RC_DIRECTORY")
+        fi
+    fi
+
+    if [ "$FILE_PATH" = "" ]; then
+        error_handler 4
+        exit 1
+    fi
+    
+}
+
+most_edited_file () {
+    # Determines the most edited file in the specified directory.
+    # This function also accounts for various filters set by the flags similar to last_opened_file function.
+
+    # It uses awk to process the log file (MOLE_RC_DIRECTORY) and counts the number of times each file has been edited.
+    # The counting is influenced by the filters based on the date or group.
+
+    # The function identifies the file with the highest edit count and stores its path in FILE_PATH.
+    # If no file matches the criteria, an error is shown using the error_handler.
+
+    if [ $GFLAG -ne 1 ]; then
+
+        if [ $AFLAG -eq 1 ] && [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v A_TIME="$A_TIME" -v B_TIME="$B_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && (splitarr[1] > A_TIME) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]=1
+                }
+                else if ( (splitarr[1] > A_TIME) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]++
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $AFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v A_TIME="$A_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && (splitarr[1] > A_TIME) && ($4 != "deleted")){
+                    arr[$1]=1
+                }
+                else if ( (splitarr[1] > A_TIME) && ($4 != "deleted")){
+                    arr[$1]++
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v B_TIME="$B_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]=1
+                }
+                else if ( (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]++
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $AFLAG -ne 1 ] && [ $BFLAG -ne 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                if (! ($1 in arr) && ($4 != "deleted")){
+                    arr[$1]=1
+                }
+                else if($4 != "deleted"){
+                    arr[$1]++
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+        fi
+
+        
+
+    elif [ $GFLAG -eq 1 ]; then
+
+        if [ $AFLAG -eq 1 ] && [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v GROUP="$GROUP" -v A_TIME="$A_TIME" -v B_TIME="$B_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && ($3 ~ GROUP) && (splitarr[1] > A_TIME) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]=1;
+                }
+                else if ( ($3 ~ GROUP) && (splitarr[1] > A_TIME) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]++;
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $AFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v GROUP="$GROUP" -v A_TIME="$A_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && ($3 ~ GROUP) && (splitarr[1] > A_TIME) && ($4 != "deleted")){
+                    arr[$1]=1;
+                }
+                else if ( ($3 ~ GROUP) && (splitarr[1] > A_TIME) && ($4 != "deleted")){
+                    arr[$1]++;
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $BFLAG -eq 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v GROUP="$GROUP" -v B_TIME="$B_TIME" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                split($2, splitarr, "_")
+                if (! ($1 in arr) && ($3 ~ GROUP) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]=1;
+                }
+                else if ( ($3 ~ GROUP) && (splitarr[1] < B_TIME) && ($4 != "deleted")){
+                    arr[$1]++;
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+
+        elif [ $AFLAG -ne 1 ] && [ $BFLAG -ne 1 ]; then
+            FILE_PATH=$(awk -v FILE_PATH="$FILE_PATH" -F';' -v GROUP="$GROUP" '{
+                temp_dir=$1
+                sub(/\/[^\/]*$/,"",temp_dir)
+                if (temp_dir != FILE_PATH){
+                    next;
+                }
+
+                if (! ($1 in arr) && ($3 ~ GROUP) && ($4 != "deleted")){
+                    arr[$1]=1;
+                }
+                else if ( ($3 ~ GROUP) && ($4 != "deleted")){
+                    arr[$1]++;
+                }
+            }
+            END {
+                for (x in arr) {
+                    if (arr[x] > max){
+                        max = arr[x]
+                        position_of_x = x
+                    }
+                }
+                print position_of_x
+            }' "$MOLE_RC_DIRECTORY")
+        fi
+
+    fi
+
+    if [ "$FILE_PATH" = "" ]; then
+        error_handler 4
+        exit 1
+    fi
+}
+
+check_mole_rc() {
+    # Checks and initializes the MOLE_RC configuration.
+
+    if [ "${MOLE_RC}" = "" ]; then
+        error_handler 2
+        exit 1
+    fi
+
+    dirname=$(dirname "${MOLE_RC}")
+
+    if [ ! -d "$dirname" ]; then
+        echo "Creating directory .mole"
+        mkdir -p "$dirname"
+    fi
+
+    if [ ! -d "/home/$USER/.mole" ]; then
+        mkdir -p "/home/$USER/.mole"
+    fi
+
+    if [ ! -f "${MOLE_RC}" ]; then
+        echo "Creating MOLE_RC file..."
+        touch "${MOLE_RC}"
+    fi
+
+    MOLE_RC_DIRECTORY=${MOLE_RC}
+}
+
+find_file_path() {
+    # Determines the file path to be processed.
+
+    shift $((OPTIND -1))
+
+    if [ "$LISTFLAG" -eq 1 ] || [ "$SECRET_LOGFLAG" -eq 1 ]; then
+        shift
+    fi
+
+    if [ $SECRET_LOGFLAG -eq 1 ]; then
+        secret_log "$@"
+        exit
+    fi
+
+    if [ "$#" -eq 1 ]; then
+        FILE_PATH="$1"
+    elif [ "$#" -gt 1 ]; then
+        error_handler 3
+        exit 1
+    else
+        FILE_PATH=$(realpath .)
+    fi
+
+    
+    if [ -f "$FILE_PATH" ]; then
+        FILE_PATH=$(realpath "$FILE_PATH")
+        return
+    fi
+
+    if [ -d "$FILE_PATH" ]; then
+        FILE_PATH=$(realpath "$FILE_PATH")
+
+        sed -i 's/;deleted$//' "$MOLE_RC"
+        while read line; do
+            actual_line=$line
+            path=$(echo "$line" | cut -d';' -f1)
+            if [ ! -f "$path" ]; then
+                sed -i "\|${actual_line}| s/\$/;deleted/g" "$MOLE_RC"
+            fi
+        done < "$MOLE_RC"
+
+        if [ "$#" -gt 0 ]; then
+            DIRFLAG=1
+        fi
+
+        if [ $LISTFLAG -eq 1 ]; then
+            list_files
+            exit
+        fi
+
+        if [ "$MFLAG" -eq 1 ]; then
+            most_edited_file
+        else
+            last_opened_file
+        fi
+    elif [ -d "$(dirname "$1")" ];then
+        FILE_PATH=$(realpath "$FILE_PATH")
+    
+    else
+        error_handler 5
+        exit 1
+    fi
+}
+
+write_to_mole() {
+    # Writes the file processing information to the MOLE_RC file.
+
+    if [ $GFLAG -eq 1 ]; then
+        printf "%s;%s;%s\n" "$FILE_PATH" "$DATE_TIME" "$GROUP" >> "$MOLE_RC_DIRECTORY"
+    else
+        printf "%s;%s;\n" "$FILE_PATH" "$DATE_TIME" >> "$MOLE_RC_DIRECTORY"
+    fi
+}
+
+list_files() {
+    # Generates a list of files that have been opened or edited, based on the filters applied.
+    # The function is capable of filtering files by groups, date range and directory.
+
+    # It uses awk to process the MOLE_RC_DIRECTORY file, applying filters based on the flags and arguments passed.
+    # The script formats and prints a list of files along with their group information, if any.
+
+    # The output is sorted and formatted for readability.
+    # Each line in the output shows a file and the groups it belongs to.
+
+    awk -F';' -v GROUP="$GROUP" -v A_DATE="$A_TIME" -v B_DATE="$B_TIME" -v AFLAG="$AFLAG" -v BFLAG="$BFLAG" -v GFLAG="$GFLAG" -v FILE_PATH="$FILE_PATH" -v DIR_FLAG="$DIRFLAG" '
+    BEGIN{
+        max_len_col1 = 0;
+    }
+    {
+        temp_dir=$1
+        $1 = $1 ":"
+
+        sub(/\/[^\/]*$/,"",temp_dir)
+        if (temp_dir != FILE_PATH && DIR_FLAG == 1){
+            next;
+        }
+
+
+        if (GFLAG == 1) {
+            n = split(GROUP, groups_arr, ",");
+
+            for (i = 1; i <= n; i++){
+
+                if($3 == groups_arr[i]){
+                    break;
+                }
+
+                if(i == n){
+                    next;
+                }
+            }
+        }
+
+        if (AFLAG == 1 || BFLAG == 1) {
+            split($2, date_arr, "_");
+            if (AFLAG == 1 && date_arr[1] < A_DATE) {
+                next;
+            }
+
+            if (BFLAG == 1 && date_arr[1] >  B_DATE) {
+                next;
+            }
+        }
+
+        sub(".*/", "", $1); 
+
+        len_col1 = length($1);
+        if (len_col1 > max_len_col1) {
+            max_len_col1 = len_col1;
+        }
+
+        if ( ! ($1 in arr )  ) {
+            arr[$1]="-";
+        }
+
+        if ( $1 in arr ) {
+            n = split(GROUP, groups_arr, ",");
+
+            for (i = 0; i <= n; i++) {
+                if (n == 0){
+                    i = 1;
+                }
+                
+                if (GFLAG != 1){
+                    m = split(arr[$1], find_groups, ",")
+                    for (y = 1; y <= m; y++){
+                        if($3 == find_groups[y]){
+                            next;
+                        }
+                    }
+
+
+                    if ( (arr[$1] == "" || arr[$1] == "-") && $3 != ""){
+                        arr[$1] = $3;
+                    }
+                    else if($3 != ""){
+                        arr[$1] = arr[$1] "," $3;
+                    }
+                }
+                else if($3 == groups_arr[i]){
+                    m = split(arr[$1], find_groups, ",")
+                    for (y = 1; y <= m; y++){
+                        if($3 == find_groups[y]){
+                            next;
+                        }
+                    }
+
+
+                    if ( arr[$1] == "" || arr[$1] == "-" ){
+                        arr[$1] = groups_arr[i];
+                    }
+                    else{
+                        arr[$1] = arr[$1] "," groups_arr[i];
+                    }
+                }
+            }
+        }
+
+        file_arr[$1] = arr[$1];
+    }
+    END{
+
+        PROCINFO["sorted_in"] = "@ind_str_asc" # nastavení řazení indexů pole podle abecedy
+
+        for (file_path in file_arr) {
+            # rozdělení řetězce s hodnotami skupin na pole
+            split(file_arr[file_path], groups, ",")
+
+            # seřazení pole skupin pomocí bubble sort
+            for (i = 1; i < length(groups); i++) {
+                for (j = 1; j < length(groups) - i + 1; j++) {
+                    if (groups[j] > groups[j+1]) {
+                        temp = groups[j]
+                        groups[j] = groups[j+1]
+                        groups[j+1] = temp
+                    }
+                }
+            }
+
+            # sestavení nového řetězce skupin a aktualizace pole file_arr
+            sorted_groups = groups[1]
+            for (k = 2; k <= length(groups); k++) {
+                sorted_groups = sorted_groups "," groups[k]
+            }
+            file_arr[file_path] = sorted_groups
+        }
+
+
+        for (x in file_arr){
+            printf "%-"max_len_col1"s %s\n", x, file_arr[x];
+        }   
+    }' "$MOLE_RC_DIRECTORY" | sort -d -f
+}
+
+secret_log() {
+    # Creates a compressed log of file activities within specified directories.
+    # This function is invoked when the secret-log flag is set.
+
+    # It processes the MOLE_RC_DIRECTORY file, applying date filters if specified.
+    # For each file, it compiles a history of dates when the file was edited.
+
+    # The output is a compressed bz2 file containing the logs. The file is named using the current date-time for uniqueness.
+    # This log provides a detailed history of file edits for auditing or tracking purposes.
+
+    no_dir=0
+
+    if [ "$#" -eq 0 ]; then
+        no_dir=1
+    fi
+
+    while [ "$#" -gt 0 ] || [ "$no_dir" -eq 1 ]
+    do
+
+
+        if [ "$no_dir" -eq 0 ]; then
+            DIRECTORY=$(realpath "$1")
+        fi
+
+        if [ -d "$DIRECTORY" ] || [ "$no_dir" -eq 1 ] ; then
+            awk -F';' -v A_DATE="$A_TIME" -v B_DATE="$B_TIME" -v AFLAG="$AFLAG" -v BFLAG="$BFLAG" -v DIRECTORY="$DIRECTORY" -v no_dir="$no_dir" '{
+            
+                if (AFLAG == 1 || BFLAG == 1) {
+                    split($2, date_arr, "_");
+                    if (AFLAG == 1 && date_arr[1] <= A_DATE) {
+                        next;
+                    }
+
+                    if (BFLAG == 1 && date_arr[1] >=  B_DATE) {
+                        next;
+                    }
+                }
+
+                filepath=$1
+                sub(/\/[^\/]*$/,"",filepath)
+
+                if ( (! (filepath == DIRECTORY)) &&  (no_dir == 0) ){
+                    next;
+                }
+
+                if ( ! ($1 in arr )  ) {
+                    arr[$1] = ""
+                }
+
+                if ( $1 in arr ) {
+                    if( arr[$1] == "" ){
+                        arr[$1] = $2
+                    }
+                    else{
+                        arr[$1] = arr[$1] ";" $2
+                    }
+                }
+                
+                file_arr[$1] = arr[$1];
+            }
+            END{
+                for (x in file_arr){
+                    printf "%s;%s\n", x, file_arr[x];
+                }   
+
+            }' "$MOLE_RC_DIRECTORY" | sort -d -f | bzip2 -c >> "/home/$USER/.mole/log_""$USER""_""$DATE_TIME"".bz2"
+        fi
+
+
+        if [ "$no_dir" -eq 0 ]; then
+            shift
+        else
+            no_dir=0
+            break
+        fi
+        
+    done
+
+}
+
+check_realpath(){
+    if [ ! -x "$(command -v realpath)" ]; then
+        error_handler 6
+        exit 1
+    fi
+}
+
+
+# These function calls are the primary execution steps of the script.
+# They perform initial checks, parse arguments, and find the target file path.
+check_realpath
+check_mole_rc
+parse_args "$@"
+find_file_path "$@"
+
+# If the target file path exists and is a regular file, log the action.
+if [ -f "$FILE_PATH" ]; then
+    write_to_mole
+fi
+
+$EDITOR "$FILE_PATH"
